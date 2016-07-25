@@ -1,14 +1,11 @@
-#! /bin/bash
+#!/bin/bash
 
 version="0.0.1"
-build_time="2009-07-17"
 
-#script_path=$(dirname $0)
-#script_name=$(basename $0)
 script_path="$(cd $(dirname "$0"); pwd -P)"
 script_name="$(basename $0)"
 program_name=$(echo "${script_name}" | sed 's/\([[:alnum:]]\+\)_control$/\1/')
-[[ ! -f "$script_path" ]] && module_dir="$(dirname $script_path)" #Ä£¿éÂ·¾¶Ãû
+[[ ! -f "$script_path" ]] && module_dir="$(dirname $script_path)"
 
 function check_limit(){
 	user="$(echo $USER)"
@@ -17,7 +14,7 @@ function check_limit(){
 	then
 		echo "$user can't execute ${script_name}"
 		exit
-	fi	
+	fi
 
 	echo "$module_dir" |grep -q "${program_name}\>"
 	if [ $? -ne 0 ]
@@ -42,12 +39,10 @@ fi
 function print_version() {
 cat <<-print_version
         ${script_name} ${version}
-        Copyright Baidu Inc.
 print_version
 }
 
 function usage() {
-
 cat <<-usage
         Usage: ${script_name} [start|stop|restart|health|reload] [|all|modulename] [log]
 usage
@@ -439,28 +434,28 @@ function process(){
 }
 case X"${command_input}" in
     Xstart)
-        	ulimit -c unlimited
-        	exec 0</dev/null
-		process mstart "$mod" "$methd" ;c_flag=$?
+        ulimit -c unlimited
+        exec 0</dev/null
+        process mstart "$mod" "$methd" ;c_flag=$?
         ;;
     Xstop)
-                process mstop "$mod" "$methd" ;c_flag=$?
+        process mstop "$mod" "$methd" ;c_flag=$?
         ;;
     Xrestart)
-		process mrestart "$mod" "$methd"; c_flag=$? 
+        process mrestart "$mod" "$methd"; c_flag=$? 
         ;;
     Xreload)
-       	        echo " ${command_input} can't support" 
-		#process mreload $mod $methd;c_flag=$?
+        echo " ${command_input} can't support" 
+        #process mreload $mod $methd;c_flag=$?
         ;;
     Xhealth)
-        	process health "$mod" "$methd"
+        process health "$mod" "$methd"
         ;;
     Xcleanup)
-        	echo "${program_name} ${command_input}." 
+        echo "${program_name} ${command_input}." 
         ;;
     Xcheck)
-        	echo "${program_name} ${command_input}." 
+        echo "${program_name} ${command_input}." 
         ;;
     Xhelp)
         usage
