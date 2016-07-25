@@ -1,0 +1,479 @@
+#! /bin/bash
+
+version="0.0.1"
+build_time="2009-07-17"
+
+#script_path=$(dirname $0)
+#script_name=$(basename $0)
+script_path="$(cd $(dirname "$0"); pwd -P)"
+script_name="$(basename $0)"
+program_name=$(echo "${script_name}" | sed 's/\([[:alnum:]]\+\)_control$/\1/')
+[[ ! -f "$script_path" ]] && module_dir="$(dirname $script_path)" #模块路径名
+
+function check_limit(){
+	user="$(echo $USER)"
+	suser=$(ls -l ${script_path}/${script_name} | awk '{print $3}'|head -n 1)
+	if [  "$user" != "$suser" ] && [ "$user" != "root" ]
+	then
+		echo "$user can't execute ${script_name}"
+		exit
+	fi	
+
+	echo "$module_dir" |grep -q "${program_name}\>"
+	if [ $? -ne 0 ]
+	then
+		echo "$script_name path error!"
+		exit
+	fi
+}
+
+check_limit
+source ${module_dir}/conf/control.conf
+
+log_dir="$module_dir/"
+status_dir="${module_dir}/status"
+if [ "$SUPER_DIR_FLAG" -eq 1 ]
+then
+	super_name="$SUPERVISE_NAME"
+else
+	super_name="${module_dir}/$SUPERVISE_NAME"
+fi
+
+function print_version() {
+cat <<-print_version
+        ${script_name} ${version}
+        Copyright Baidu Inc.
+print_version
+}
+
+function usage() {
+
+cat <<-usage
+        Usage: ${script_name} [start|stop|restart|health|reload] [|all|modulename] [log]
+usage
+}
+
+command_input=$1
+if [ $# -eq 1 ]
+then
+	mod="all"
+elif [ $# -eq 2 ]
+then
+	mod="$2"
+elif [ $# -eq 3 ]
+then
+	mod="$2"
+	methd="$3"
+else
+	usage
+	exit 1
+fi
+
+function optail(){
+	module="$1"
+    	trap : SIGINT
+    	tail -F $module
+        trap - SIGINT
+}
+
+function check_pro_limit(){
+	local flag module pro_dir super_dir user pro_user
+	module="$1"
+	dir="$2"
+        super_dir="${status_dir}/${module}"		
+	pro_dir="$dir/${module}"
+	user="$(echo $USER)"
+	pro_user=$(ps auxw |grep "${super_dir}\>" |awk '{print $1}' |head -n 1)
+	if [ -z "$pro_user" ];then	
+		pro_user=$(ps auxw |grep "${pro_dir}\>" |awk '{print $1}' |head -n 1)
+	fi
+	
+	if [  "$pro_user" != "$user"  ] && [ "$user" != "root" ]
+	then
+		return 1 
+	else
+		return 0
+	fi
+	
+}
+function check_port(){
+	local proc_name proc_port port_name 
+        if [ $# -eq 2  ];then
+                proc_name="$1"
+                port="$2"
+		ports=$(netstat -ntl 2>/dev/null | awk -F'[ :]+' '/LISTEN/{print $5}')
+		for port_i in $ports
+                do
+			! [[ $port_i =~ ^[0-9]+$ ]] &&  continue 
+                        [[ "$port" = "$port_i" ]] && return 0 
+                done
+		return 1
+        else
+                return 1
+        fi
+}
+
+function check_pid(){
+	local module status_file
+	module="$1"
+	pid_flag=1
+	status_file="${module_dir}/status/${module}/status"
+	if [ -f "$status_file" ]
+	then
+		pro_pid=`od -d --skip-bytes=${SUPER_CHAR} $status_file |awk '{print $2}'`
+		#pro_cpid=`pstree -p $pro_pid |sed -r 's/.*\(([[:digit:]]+)\)/\1/'`
+		sleep 0.5 
+        	pid_list=(`ps axo pid,cmd |grep ${module} |awk '{print $1}'`)
+		if [ "$pro_pid" ]
+		then
+			for PID in ${pid_list[@]}
+		        do
+		        	if [ "$pro_pid" -eq "$PID" ]
+		        	then
+		               		pid_flag=0
+		                	break
+		        	fi
+		        done
+		fi
+	fi
+}
+function check_health(){
+	local mod_name port flag port_flag
+	mod_name="$1"
+	port="$2"
+    check_pid "$mod_name"
+	if [ -z "$port" ]
+	then
+		port_flag=0
+	else
+		check_port "$mod_name" "$port" ;port_flag=$?
+	fi
+        if [ "$pid_flag" -eq 0 ] && [ "$port_flag" -ne 1 ]
+        then
+                flag=$OK # OK=0
+	elif [ "$pid_flag" -eq 0 ] && [ "$port_flag" -eq 1 ]
+	then
+		flag=$PID_NOPORT #start timeout 
+	elif [ "$pid_flag" -eq 1 ] && [ "$port_flag" -eq 0 ]
+	then
+		flag=$NOPID_PORT #stop timeout 
+        else
+                flag=$FAILED #1
+        fi	
+	return $flag
+}
+function mv_satus_lock(){
+	local lock_dir
+	lock_dir="$1"
+	if [ -d "$lock_dir" ]
+        then
+               cd "$lock_dir/" && rm -rf lock  2>/dev/null
+                         
+        fi
+}
+#check wf log
+function check_log(){
+	local mod_name log_name
+	mod_name="$1"
+	log_name="$2"
+	if [ -e "${log_dir}/${log_name}" ]
+	then
+		optail "${log_dir}/${log_name}"
+		return 0	
+	else
+		echo "no ${log_dir}/${log_name} file"
+		return 1
+	fi
+}
+#############################################################################
+#function start 
+#############################################################################
+function mstart(){
+ 	local mod_name port modnum flag  heal_flag pot_flag module_conf limit_dir	
+	modnum="$1"
+	mname="MOD_NAME$modnum"
+	mport="MOD_PORT$modnum"
+	cname="MOD_START_CONF$modnum"
+	ldir="MOD_LIMIT_DIR$modnum"
+	bindir="MOD_BIN_DIR$modnum"
+
+        mod_name="${!mname}"
+	port="${!mport}"
+	module_conf="${!cname}"
+	limit_dir="${!ldir}"
+	bin_dir="${!bindir}"
+	# check proces superpid
+	supid=`ps axo pid,cmd|grep "${super_name}\>" |grep "${status_dir}/${mod_name}\>" |awk '{print $1}'`
+	if [ ! -z "$supid" ];then
+		echo "${status_dir}/${mod_name} supervise is running!"
+		return $ERROR
+	fi
+	[ ! -d "${status_dir}/${mod_name}" ] && mkdir -p "${status_dir}/${mod_name}" 2>/dev/null
+	[ -f "${status_dir}/${mod_name}/lock" ] && cd "${status_dir}/${mod_name}" && rm -rf lock 2>/dev/null
+	
+	cd "$module_dir"
+	if [ -e "${super_name}" ] 
+	then
+		[[ -e "${bin_dir}/${mod_name} " ]] &&  echo "${bin_dir}/${mod_name} doesn't exist"
+        	${super_name} ${status_dir}/${mod_name} nohup ${limit_dir} ${bin_dir}/${mod_name}  ${module_conf}>/dev/null 2>&1 &
+		supid=`ps axo pid,cmd|grep "${super_name}\>" |grep "${status_dir}/${mod_name}\>" |awk '{print $1}'`
+		[[ ! -z $supid ]] && return $OK
+	else
+		echo "${super_name} doesn't exist"
+		return $ERROR
+	fi
+}
+#############################################################################
+#function stop
+#############################################################################
+
+function mstop(){
+	local mnum flag pidlist k_flag sup_ppid limit_flag
+	modnum="$1"
+        mname="MOD_NAME$modnum"
+        bindir="MOD_BIN_DIR$modnum"
+	kflag="KILL_FLAG$modnum"
+	kpname="KILL_PRO_NAME$modnum"
+
+        mod_name="${!mname}"
+        bin_dir="${!bindir}"
+	k_flag="${!kflag}"
+	pname="${!kpname}"
+	mod_status="${status_dir}/${mod_name}"
+	check_pro_limit "$mod_name" "$bin_dir";limit_flag=$?
+	if [ "$limit_flag" -eq 1 ];then
+		echo "stop $mod_name Permission denied!";return $ERROR
+	fi 
+	supid=`ps axo pid,cmd|grep "${super_name}\>" |grep "${status_dir}/${mod_name}\>" |awk '{print $1}'`
+        if [ -z "$supid" ];then
+                echo "${status_dir}/${mod_name} not running!"
+                return $ERROR
+        fi	
+	check_pid "$mod_name"
+	if [ ! -z "$pro_pid" ]
+	then
+		if [ -f "/proc/$pro_pid/status" ];then
+                	sup_pid=$(grep 'PPid' /proc/$pro_pid/status |awk '{print $2}')		
+		fi
+	else
+		echo "$mod_name not running!"
+		return $ERROR	
+	fi
+	if [ ! -z "$sup_pid" ] && [ "$sup_pid" = "1" ]   
+	then
+	
+		if [ "$k_flag" = "1" ]
+		then
+			if [ ! -z "$supid" ] && [ "$supid" != "1" ]
+			then
+				kill -9 $supid 2>/dev/null
+				[[ "$pname" ]] && killall -9 $pname 2>/dev/null
+			else
+				[[ "$pname" ]] && killall -9 $pname 2>/dev/null
+			fi
+		else
+			echo "please check KILL_PRO_NAME$mnum KILL_FLAG$mnum!"
+			return $ERROR
+		fi
+		mv_satus_lock "$mod_status"
+	else
+		if [ "$k_flag" = "0" ] 
+		then
+                	kill -9 $sup_pid 2>/dev/null
+			kill -9 $supid 2>/dev/null
+                	kill -9 $pro_pid 2>/dev/null
+		elif [ "$k_flag" = "1" ]
+		then
+			kill -9 $sup_pid 2>/dev/null
+			kill -9 $supid 2>/dev/null
+                        [[ "$pname" ]] && killall -9 $pname 2>/dev/null 
+		fi
+		mv_satus_lock "$mod_status"
+	fi
+	return $flag
+}
+#############################################################################
+#function restart 
+#############################################################################
+function mrestart(){
+	local mnum flag pidlist k_flag pname bin_dir sup_ppid limit_flag md5new md5old statusfile
+	modnum="$1"
+        mname="MOD_NAME$modnum"
+        bindir="MOD_BIN_DIR$modnum"
+	kflag="KILL_FLAG$modnum"
+        kpname="KILL_PRO_NAME$modnum"
+
+        mod_name="${!mname}"
+        bin_dir="${!bindir}"
+	k_flag="${!kflag}"
+	pname="${!kpname}"
+	statusfile="${status_dir}/${mod_name}/status"
+	check_pro_limit  "$mod_name" "$bin_dir";limit_flag=$?
+        if [ $limit_flag -eq 1 ];then
+                echo "restart $mod_name Permission denied!"
+                return $ERROR #ERROR
+        fi
+ 	check_pid "$mod_name"
+	if [ ! -z "$pro_pid" ] && [ -f "/proc/$pro_pid/status" ]
+        then
+                sup_pid=$(grep 'PPid' /proc/$pro_pid/status |awk '{print $2}')
+	else
+		echo "Please check "${module_dir}/${bin_dir}/${mod_name}" is running!"
+		return $ERROR
+        fi
+	if [ ! -z "$sup_pid" ] && [ "$sup_pid" -eq 1 ]
+	then
+                echo "$mod_name no supervise process!"
+                return $ERROR
+	else 
+		if [ "$k_flag" = "0" ]
+		then
+			kill -9 $pro_pid 2>/dev/null 
+			return $OK
+		elif [ "$k_flag" = "1" ]
+		then
+			killall -9 "$pname" 2>/dev/null
+			return $OK
+		fi
+	fi	
+}
+
+function mreload(){
+	mod_name=$1
+	port=$2
+	log=$3
+	log_flag=$4
+	
+	return $flag
+}
+function process(){
+	local comm mod mode_command module port mlog
+	comm="$1"
+	mod="$2"
+	mode_command="$3"
+	
+	if [ $mod = "all" ]
+        then
+                for ((i=0; i<"$MODULE_NUM"; i++))
+                do
+			mname="MOD_NAME$i"
+         	        mport="MOD_PORT$i"
+         	        mplog="MOD_WFLOG$i"
+         	        module="${!mname}"
+         	        port="${!mport}"
+         	        mlog="${!mplog}"
+			if [ $comm = "health" ]
+			then
+			 	check_health "$module" "$port" ; tflag=$?
+				if [ $tflag -eq "$OK" ]
+				then
+					echo "$module work ok!"
+				else
+					echo "$module doesn't work"
+				fi
+			else
+                        	$comm "$i"; tflag=$?
+			fi	
+
+			if [ "$tflag" -eq "$OK" ]
+                        then
+                                echo "${module} ${command_input} done!"
+			else
+				echo "${module} ${command_input} faild!"
+                        fi
+                        
+			if [ "$mode_command" ] && [ "$mode_command" = "log" ]
+                        then
+                               check_log "$module" "$mlog" ;logflag=$?
+                        fi
+                done
+
+        else
+		for ((i=0; i<"$MODULE_NUM"; i++))
+                do
+                        mname="MOD_NAME$i"
+                        mport="MOD_PORT$i"
+                        mplog="MOD_WFLOG$i"
+                        module="${!mname}"
+                        port="${!mport}"
+                        mlog="${!mplog}"
+			if [ "$module" = "$mod" ]
+			then
+			       if [ "$comm" = "health" ]
+                               then
+                               	     check_health "$module" "$port" ; t_flag=$?
+                               	     if [ "$tflag" -eq "$OK" ]
+                               	     then
+                               	           echo "$module work ok!"
+                               	     else
+                               	           echo "$module doesn't work"
+                               	     fi
+                                else
+                                      $comm "$i"; tflag=$?
+                                fi
+				if [ "$tflag" -eq "$OK" ]
+                      		then
+                      		        echo "${module} ${command_input}  done!"
+                      		else
+                      		        echo "${module} ${command_input} faild!"
+                      		fi
+				
+		                if [ "$mode_command" ] && [ "$mode_command" = "log" ]
+                                then
+		        		echo "tail -f $log........"; sleep 2
+                                        check_log "$module" "$mlog"  ;logflag=$?
+                                fi
+				break
+			else
+				let num=num+1
+			fi
+			
+                done
+		if   [ "$num" = "$MODULE_NUM" ]
+		then
+			echo "module name($mod) is error!"
+		fi
+        fi
+	return $tflag
+
+}
+## 根据不同的参数选择不同的接口行为
+case X"${command_input}" in
+    Xstart)
+        	ulimit -c unlimited
+        	exec 0</dev/null
+		process mstart "$mod" "$methd" ;c_flag=$?
+        ;;
+    Xstop)
+                process mstop "$mod" "$methd" ;c_flag=$?
+        ;;
+    Xrestart)
+		process mrestart "$mod" "$methd"; c_flag=$? 
+        ;;
+    Xreload)
+       	        echo " ${command_input} can't support" 
+		#process mreload $mod $methd;c_flag=$?
+        ;;
+    Xhealth)
+        	process health "$mod" "$methd"
+        ;;
+    Xcleanup)
+        	echo "${program_name} ${command_input}." 
+        ;;
+    Xcheck)
+        	echo "${program_name} ${command_input}." 
+        ;;
+    Xhelp)
+        usage
+        ;;
+    Xversion)
+        print_version
+        ;;
+    *)
+        usage
+        exit 1
+        ;; 
+esac
+
+exit $c_flag
+
