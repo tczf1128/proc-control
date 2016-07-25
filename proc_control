@@ -437,7 +437,6 @@ function process(){
 	return $tflag
 
 }
-## 根据不同的参数选择不同的接口行为
 case X"${command_input}" in
     Xstart)
         	ulimit -c unlimited
